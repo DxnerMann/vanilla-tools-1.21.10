@@ -3,20 +3,14 @@ package net.pinkraven.vanillatools.status;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
-import net.minecraft.entity.player.PlayerModelPart;
-import net.minecraft.network.encryption.PublicPlayerSession;
-import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
-import net.minecraft.server.MinecraftServer;
+import net.minecraft.scoreboard.Scoreboard;
+import net.minecraft.scoreboard.Team;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
-import net.minecraft.util.Nullables;
 
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static net.minecraft.server.command.CommandManager.argument;
 import static net.minecraft.server.command.CommandManager.literal;
@@ -24,10 +18,12 @@ import static net.minecraft.server.command.CommandManager.literal;
 public class StatusManager {
 
     private Map<String, String> statuses;
+    private Map<Team, List<ServerPlayerEntity>> teams;
     private final LiteralArgumentBuilder<ServerCommandSource> statusCommand;
 
     public StatusManager() {
-        statuses = new HashMap<>();
+		statuses = new HashMap<>();
+        teams = new HashMap<>();
 
         this.statusCommand = literal("status")
                 // status <status>
@@ -68,7 +64,7 @@ public class StatusManager {
                                             final String name = StringArgumentType.getString(context, "name");
                                             final String color = StringArgumentType.getString(context, "color");
                                             try {
-                                                createStatus(name, color);
+                                                createStatus(name, color, context.getSource().getPlayer());
                                                 context.getSource().sendFeedback(() -> Text.literal("Created Status: " + name + " with Color " + color), true);
                                                 return 0;
                                             } catch (IllegalArgumentException e) {
@@ -87,7 +83,7 @@ public class StatusManager {
                                 .executes(context -> {
                                     final String name = StringArgumentType.getString(context, "name");
                                     try {
-                                        removeStatus(name);
+                                        deleteStatus(name, context.getSource().getPlayer());
                                         context.getSource().sendFeedback(() -> Text.literal("Removed Status: " + name), true);
                                         return 0;
                                     } catch (IllegalArgumentException e) {
@@ -96,7 +92,16 @@ public class StatusManager {
                                     }
                                 })
                         )
-                );
+                ).executes(context -> {
+                    try {
+                        removeStatus(context.getSource().getPlayer());
+                        context.getSource().sendFeedback(() -> Text.literal("Status is now removed"), false);
+                        return 0;
+                    } catch (IllegalArgumentException e) {
+                        context.getSource().sendError(Text.literal(e.getMessage()));
+                        return 0;
+                    }
+                });
     }
 
     public LiteralArgumentBuilder<ServerCommandSource> getStatusCommand() {
@@ -119,22 +124,32 @@ public class StatusManager {
         };
     }
 
-    private void createStatus(String name, String color) {
+    private void createStatus(String name, String color, ServerPlayerEntity player) {
         if (!statuses.containsKey(name)) {
             statuses.put(name, color);
+
+			Team newTeam = player.getEntityWorld().getScoreboard().addTeam(name);
+			newTeam.setDisplayName(Text.literal(name));
+
+			Text prefix = Text.literal("[").formatted(Formatting.GRAY)
+					.append(Text.literal(name).formatted(Formatting.valueOf(color.toUpperCase())))
+					.append(Text.literal("]")).formatted(Formatting.GRAY)
+					.append(" ");
+			newTeam.setPrefix(prefix);
+
+            teams.put(newTeam, List.of());
+
         } else {
             throw new IllegalArgumentException("Status " + name + " already exists.");
         }
-
-        /*TODO:
-        * - DO I NEED TO SAVE THIS FOR SERVER RESTART?
-        * */
-
     }
 
-    private void removeStatus(String name) {
+    private void deleteStatus(String name, ServerPlayerEntity player) {
         if (statuses.containsKey(name)) {
             statuses.remove(name);
+
+			player.getEntityWorld().getServer().getScoreboard().removeTeam(player.getEntityWorld().getScoreboard().getTeam(name));
+            teams.remove(player.getEntityWorld().getScoreboard().getTeam(name));
         } else {
             throw new IllegalArgumentException("No status with name " + name);
         }
@@ -142,49 +157,22 @@ public class StatusManager {
     }
 
     private void setStatus(String name, ServerPlayerEntity player) {
-        String playerName = player.getName().getString();
-        String color = statuses.get(name);
+        Scoreboard scoreboard = player.getEntityWorld().getServer().getScoreboard();
+        Team team = scoreboard.getTeam(name);
 
-        Text newName = Text.literal("[")
-                .append(Text.literal(name).formatted(Formatting.valueOf(color.toUpperCase())))
-                .append("] ")
-                .append(Text.literal(playerName));
+        if (team == null) {
+            throw new IllegalArgumentException("No Status with name " + name);
+        } else {
+            String playerName = player.getName().getString();
+            scoreboard.addScoreHolderToTeam(playerName, team);
 
-        player.setCustomName(newName);
-        player.setCustomNameVisible(true);
-
-        MinecraftServer server = player.getEntityWorld().getServer();
-        if (server != null) {
-            server.getPlayerManager().sendToAll(
-                    new PlayerListS2CPacket(PlayerListS2CPacket.Action.UPDATE_DISPLAY_NAME, player)
-            );
+            teams.computeIfAbsent(team, k -> new ArrayList<>()).add(player);
         }
+    }
 
-        /*
-        MinecraftServer server = player.getEntityWorld().getServer();
-        if (server != null) {
-            PlayerListS2CPacket.Entry entry = new PlayerListS2CPacket.Entry(
-                    player.getUuid(),
-                    player.getGameProfile(),
-                    true,
-                    player.networkHandler.getLatency(),
-                    player.interactionManager.getGameMode(),
-                    newName,
-                    player.isModelPartVisible(PlayerModelPart.HAT),
-                    player.getPlayerListOrder(),
-                    (PublicPlayerSession.Serialized) Nullables.map(player.getSession(), PublicPlayerSession::toSerialized)
-            );
-
-            PlayerListS2CPacket packet = new PlayerListS2CPacket(
-                    EnumSet.of(PlayerListS2CPacket.Action.UPDATE_DISPLAY_NAME),
-                    List.of(entry)
-            );
-
-            for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
-                viewer.networkHandler.sendPacket(packet);
-            }
-        }
-        */
+    private void removeStatus(ServerPlayerEntity player) {
+        Scoreboard scoreboard = player.getEntityWorld().getScoreboard();
+        scoreboard.removeScoreHolderFromTeam(player.getName().getString(), getTeamFromPlayer(player));
     }
 
     private String getStatusInfo() {
@@ -194,5 +182,13 @@ public class StatusManager {
             stringBuilder.append(name + ": ").append(color.formatted(Formatting.valueOf(color.toUpperCase()))).append("\n");
         });
         return stringBuilder.toString();
+    }
+
+    private Team getTeamFromPlayer(ServerPlayerEntity player) {
+        return teams.entrySet().stream()
+                .filter(entry -> entry.getValue().contains(player))
+                .map(Map.Entry::getKey)
+                .findFirst()
+                .orElse(null);
     }
 }
